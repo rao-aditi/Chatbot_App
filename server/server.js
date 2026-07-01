@@ -22,7 +22,7 @@ const CLIENT_ORIGINS = process.env.CLIENT_ORIGIN
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
-    "https://office-managment-testing.vercel.app"
+    "https://chatbot-app-rust.vercel.app/"
   ]
 
 const app = express();
