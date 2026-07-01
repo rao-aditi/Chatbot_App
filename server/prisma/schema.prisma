@@ -1,0 +1,82 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  role      String   @default("user")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages Message[]
+  sessions ChatSession[]
+}
+
+model Room {
+  id          String    @id @default(cuid())
+  name        String?
+  type        String    @default("general")
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  lastMessage DateTime?
+
+  users    RoomUser[]
+  messages Message[]
+
+  sessions ChatSession[]
+}
+
+model RoomUser {
+  id       String   @id @default(cuid())
+  roomId   String
+  userId   String
+  userName String?
+  joinedAt DateTime @default(now())
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  roomId    String
+  senderId  String?
+  sender    String // 'user', 'bot', 'agent'
+  text      String   @db.Text
+  type      String   @default("text") 
+  metadata  Json? // Additional metadata
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  room Room  @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [senderId], references: [id])
+}
+
+model KnowledgeBase {
+  id        String   @id @default(cuid())
+  section   String
+  question  String   @db.Text
+  answer    String   @db.Text
+  keywords  String[] 
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ChatSession {
+  id        String    @id @default(cuid())
+  userId    String?
+  roomId    String
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+  status    String    @default("active") 
+
+  room Room  @relation(fields: [roomId], references: [id])
+  user User? @relation(fields: [userId], references: [id])
+}
