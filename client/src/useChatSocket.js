@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { io } from 'socket.io-client';
 
-const SERVER_URL = process.env.REACT_APP_SERVER_URL || 'http://localhost:5002';
+const SERVER_URL = process.env.REACT_APP_SERVER_URL || 'https://chatbot-app-t7b7.onrender.com/api';
 
 export default function useChatSocket(initialRoomId) {
   const socketRef = useRef(null);

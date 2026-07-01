@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { io } from 'socket.io-client';
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:5002';
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'https://chatbot-app-t7b7.onrender.com/api';
 
 export default function useAdminSocket() {
   const socketRef = useRef(null);
