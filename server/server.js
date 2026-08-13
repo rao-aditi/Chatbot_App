@@ -239,20 +239,29 @@ io.on('connection', (socket) => {
   } else {
     socket.join(roomId);
 
-    createOrGetRoom(roomId, userId, userName, userEmail).then(async (room) => {
-      const messages = await prisma.message.findMany({
-        where: { roomId: room.id },
-        orderBy: { createdAt: 'asc' },
-        take: 100
-      });
+    createOrGetRoom(roomId, userId, userName, userEmail)
+      .then(async (room) => {
+        const messages = await prisma.message.findMany({
+          where: { roomId: room.id },
+          orderBy: { createdAt: 'asc' },
+          take: 100
+        });
 
-      socket.emit('history', messages);
-    });
+        socket.emit('history', messages);
+      })
+      .catch((error) => {
+        // A DB error here must not crash the whole Socket.IO server for
+        // every connected client — log it and let the client retry/reconnect.
+        console.error('Error loading room/history on connection:', error);
+        socket.emit('error', { message: 'Failed to load chat history' });
+      });
   }
 
   // Admin joining a specific customer's room
   socket.on('join_room', async (targetRoomId) => {
-    if (isAdmin) {
+    if (!isAdmin) return;
+
+    try {
       socket.join(targetRoomId);
 
       const messages = await prisma.message.findMany({
@@ -262,6 +271,9 @@ io.on('connection', (socket) => {
       });
 
       socket.emit('history', messages);
+    } catch (error) {
+      console.error('Error loading room on join_room:', error);
+      socket.emit('error', { message: 'Failed to load room' });
     }
   });
 
@@ -387,13 +399,21 @@ async function createOrGetRoom(roomId, userId, userName, userEmail) {
     });
 
     if (!existingUser) {
-      await prisma.user.create({
-        data: {
-          id: userId,
-          email: userEmail,
-          name: userName || ""
-        }
-      });
+      try {
+        await prisma.user.create({
+          data: {
+            id: userId,
+            email: userEmail,
+            name: userName || ""
+          }
+        });
+      } catch (error) {
+        // email is globally unique — a different userId sharing the same
+        // email (e.g. same person, cleared localStorage) must not crash
+        // the connection. Log it and continue without a User row for this id.
+        if (error.code !== 'P2002') throw error;
+        console.warn(`User email ${userEmail} already registered under a different id; skipping create for ${userId}`);
+      }
     }
 
     const existingRoomUser = await prisma.roomUser.findFirst({
