@@ -15,15 +15,22 @@ const {
 
 const PORT = process.env.PORT || 5002;
 
-const CLIENT_ORIGINS = process.env.CLIENT_ORIGIN
-  ? process.env.CLIENT_ORIGIN.split(',')
-  : [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:5173",
-    "https://chatbot-app-rust.vercel.app/"
-  ]
+const DEFAULT_CLIENT_ORIGINS = [
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "http://127.0.0.1:3000",
+  "http://127.0.0.1:5173",
+  "https://chatbot-app-rust.vercel.app"
+];
+
+// Local dev origins always stay allowed alongside whatever CLIENT_ORIGIN
+// is configured, so the same deployed backend can be hit from local dev too.
+const CLIENT_ORIGINS = [
+  ...DEFAULT_CLIENT_ORIGINS,
+  ...(process.env.CLIENT_ORIGIN ? process.env.CLIENT_ORIGIN.split(',') : [])
+]
+  .map((origin) => origin.trim().replace(/\/+$/, ''))
+  .filter((origin, index, arr) => origin && arr.indexOf(origin) === index);
 
 const app = express();
 app.use(cors({
