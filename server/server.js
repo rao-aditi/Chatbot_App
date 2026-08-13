@@ -221,13 +221,18 @@ io.on('connection', (socket) => {
 
   const isAdmin = socket.handshake.query.isAdmin === 'true';
   // const roomId = socket.handshake.query.roomId || "";
-  const userId = socket.handshake.query.userId || null;
+  // Reassigned once createOrGetRoom resolves the real DB user id (see below).
+  let userId = socket.handshake.query.userId || null;
   const userName = socket.handshake.query.userName || "";
   const userEmail = socket.handshake.query.userEmail || "";
 
   const roomId = userId
     ? `room_${userId}`
     : `room_${require("crypto").randomUUID()}`;
+
+  // client_message awaits this before computing senderId, so a fast first
+  // message can't race ahead of user-id resolution (see createOrGetRoom).
+  let roomSetupPromise = Promise.resolve(null);
 
   if (isAdmin) {
     socket.join('admins');
@@ -239,22 +244,30 @@ io.on('connection', (socket) => {
   } else {
     socket.join(roomId);
 
-    createOrGetRoom(roomId, userId, userName, userEmail)
-      .then(async (room) => {
-        const messages = await prisma.message.findMany({
-          where: { roomId: room.id },
-          orderBy: { createdAt: 'asc' },
-          take: 100
-        });
-
-        socket.emit('history', messages);
+    roomSetupPromise = createOrGetRoom(roomId, userId, userName, userEmail)
+      .then(({ room, userId: resolvedUserId }) => {
+        userId = resolvedUserId;
+        return room;
       })
       .catch((error) => {
         // A DB error here must not crash the whole Socket.IO server for
         // every connected client — log it and let the client retry/reconnect.
         console.error('Error loading room/history on connection:', error);
         socket.emit('error', { message: 'Failed to load chat history' });
+        return null;
       });
+
+    roomSetupPromise.then(async (room) => {
+      if (!room) return;
+
+      const messages = await prisma.message.findMany({
+        where: { roomId: room.id },
+        orderBy: { createdAt: 'asc' },
+        take: 100
+      });
+
+      socket.emit('history', messages);
+    });
   }
 
   // Admin joining a specific customer's room
@@ -281,9 +294,17 @@ io.on('connection', (socket) => {
     const text = (payload && payload.text ? String(payload.text) : '').trim();
     if (!text) return;
 
+    // Make sure userId has been resolved (see createOrGetRoom) before it's
+    // used below — otherwise a message sent right after connecting could
+    // race ahead of that resolution and get attributed to a stale id.
+    await roomSetupPromise;
+
     const targetRoomId = isAdmin ? (payload.roomId || roomId) : roomId;
     const sender = isAdmin ? 'agent' : 'user';
-    const senderId = payload.userId || userId || null;
+    // For customers, always use the server-resolved id (see createOrGetRoom)
+    // rather than trusting the client-sent one — it may have been remapped
+    // to an existing account's id when the raw client id has no User row.
+    const senderId = isAdmin ? (payload.userId || null) : (userId || null);
 
     try {
       // Save user message to database
@@ -392,6 +413,11 @@ async function createOrGetRoom(roomId, userId, userName, userEmail) {
     });
   }
 
+  // The id that should actually be used as Message.senderId — defaults to
+  // the client-generated userId, but falls back to whichever User row really
+  // owns this email if that id doesn't have (or can't get) a User row.
+  let effectiveUserId = userId;
+
   if (userId) {
     // Create user if not exists
     const existingUser = await prisma.user.findUnique({
@@ -410,9 +436,16 @@ async function createOrGetRoom(roomId, userId, userName, userEmail) {
       } catch (error) {
         // email is globally unique — a different userId sharing the same
         // email (e.g. same person, cleared localStorage) must not crash
-        // the connection. Log it and continue without a User row for this id.
+        // the connection. Reuse the existing account's id so messages can
+        // still be attributed and saved instead of failing their FK check.
         if (error.code !== 'P2002') throw error;
-        console.warn(`User email ${userEmail} already registered under a different id; skipping create for ${userId}`);
+
+        const userByEmail = userEmail
+          ? await prisma.user.findUnique({ where: { email: userEmail } })
+          : null;
+        effectiveUserId = userByEmail ? userByEmail.id : null;
+
+        console.warn(`User email ${userEmail} already registered under a different id; using ${effectiveUserId} instead of ${userId}`);
       }
     }
 
@@ -434,7 +467,7 @@ async function createOrGetRoom(roomId, userId, userName, userEmail) {
     }
   }
 
-  return room;
+  return { room, userId: effectiveUserId };
 }
 
 async function getActiveRooms() {
