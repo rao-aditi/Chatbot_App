@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import useAdminSocket from '../useAdminSocket';
 import logo from '../assets/image.png';
 import {
@@ -47,7 +46,7 @@ function formatDate(iso) {
     }
 }
 
-function Avatar({ sender, size = 'sm' }) {
+export function Avatar({ sender, size = 'sm' }) {
     const sizeClasses = {
         sm: 'w-8 h-8 text-sm',
         md: 'w-10 h-10 text-sm',
@@ -75,7 +74,7 @@ function Avatar({ sender, size = 'sm' }) {
     );
 }
 
-function MessageBubble({ msg }) {
+export function MessageBubble({ msg }) {
     const isBot = msg.sender === 'bot';
     const isAgent = msg.sender === 'agent' || msg.sender === 'support';
     const isUser = msg.sender === 'user';
@@ -102,11 +101,6 @@ function MessageBubble({ msg }) {
                     </div>
                 )}
                 <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{msg.text}</p>
-                {isBot && msg.meta && msg.meta.matched && (
-                    <span className="inline-block mt-1.5 px-2 py-0.5 bg-gray-50 text-[#065273] text-[10px] font-semibold rounded-full">
-                        {msg.meta.section}
-                    </span>
-                )}
                 <span className="block text-[10px] opacity-60 mt-1.5 text-right">
                     {formatTime(msg.createdAt || msg.timestamp || msg.metadata?.timestamp)}
                 </span>
@@ -137,7 +131,7 @@ function SidebarRoomItem({ room, selected, onClick }) {
             <div className="flex-1 min-w-0 text-left">
                 <div className="flex items-center justify-between">
                     <span className="font-semibold text-sm text-gray-900 truncate">
-                        {room.customerName}
+                        {room.customerName || `Customer #${room.roomId?.slice(-4)}`}
                     </span>
                     {room.lastMessageTime && (
                         <span className="text-[10px] text-gray-400 whitespace-nowrap ml-2">
@@ -159,7 +153,6 @@ function SidebarRoomItem({ room, selected, onClick }) {
 }
 
 export default function AdminDashboard() {
-    const navigate = useNavigate();
     const {
         activeRooms,
         selectedRoomId,
@@ -168,6 +161,7 @@ export default function AdminDashboard() {
         connected,
         botTyping,
         sendMessage,
+        accessDenied,
     } = useAdminSocket();
 
     const [input, setInput] = useState('');
@@ -202,7 +196,7 @@ export default function AdminDashboard() {
 
     const selectedRoom = activeRooms.find((r) => r.roomId === selectedRoomId);
     const filteredRooms = activeRooms.filter(room => {
-        const name = room.customerName;
+        const name = room.customerName || '';
         return name.toLowerCase().includes(searchQuery.toLowerCase()) ||
             room.roomId?.toLowerCase().includes(searchQuery.toLowerCase());
     });
@@ -239,7 +233,7 @@ export default function AdminDashboard() {
                             <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${connected ? 'bg-green-500' : 'bg-gray-300'
                                 }`}></span>
                         </span>
-                        {connected ? 'Dashboard Connected' : 'Connecting Dashboard…'}
+                        {connected ? 'Dashboard Connected' : accessDenied ? 'Admin access unavailable — retrying…' : 'Reconnecting…'}
                     </div>
                 </div>
 
@@ -325,7 +319,7 @@ export default function AdminDashboard() {
                                     </div>
                                     <div>
                                         <h2 className="font-semibold text-gray-900">
-                                            {selectedRoom?.customerName}
+                                            {selectedRoom?.customerName || `Customer #${selectedRoomId?.slice(-4)}`}
                                         </h2>
                                         <div className="flex items-center gap-4">
                                             <span className="text-sm text-gray-500">
@@ -400,7 +394,7 @@ export default function AdminDashboard() {
                                     <textarea
                                         ref={inputRef}
                                         rows={1}
-                                        placeholder={`Reply to ${selectedRoom?.customerName}...`}
+                                        placeholder={`Reply to ${selectedRoom?.customerName || 'customer'}...`}
                                         value={input}
                                         onChange={(e) => setInput(e.target.value)}
                                         onKeyDown={handleKeyPress}

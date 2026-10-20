@@ -48,10 +48,10 @@ model Message {
   id        String   @id @default(cuid())
   roomId    String
   senderId  String?
-  sender    String // 'user', 'bot', 'agent'
+  sender    String 
   text      String   @db.Text
   type      String   @default("text") 
-  metadata  Json? // Additional metadata
+  metadata  Json? 
   isRead    Boolean  @default(false)
   createdAt DateTime @default(now())
 
@@ -59,21 +59,11 @@ model Message {
   user User? @relation(fields: [senderId], references: [id])
 }
 
-model KnowledgeBase {
-  id        String   @id @default(cuid())
-  section   String
-  question  String   @db.Text
-  answer    String   @db.Text
-  keywords  String[] 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
 model ChatSession {
   id        String    @id @default(cuid())
   userId    String?
   roomId    String
-  startedAt DateTime  @default(now())
+  startedAt DateTime  @default(now())ve
   endedAt   DateTime?
   status    String    @default("active") 
 
