@@ -63,7 +63,7 @@ model ChatSession {
   id        String    @id @default(cuid())
   userId    String?
   roomId    String
-  startedAt DateTime  @default(now())ve
+  startedAt DateTime  @default(now())
   endedAt   DateTime?
   status    String    @default("active") 
 
