@@ -162,6 +162,7 @@ export default function AdminDashboard() {
         botTyping,
         sendMessage,
         accessDenied,
+        diagnostic,
     } = useAdminSocket();
 
     const [input, setInput] = useState('');
@@ -233,8 +234,11 @@ export default function AdminDashboard() {
                             <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${connected ? 'bg-green-500' : 'bg-gray-300'
                                 }`}></span>
                         </span>
-                        {connected ? 'Dashboard Connected' : accessDenied ? 'Admin access unavailable — retrying…' : 'Reconnecting…'}
+                        {connected ? 'Dashboard Connected' : accessDenied ? 'Dashboard access unavailable — retrying…' : 'Reconnecting…'}
                     </div>
+                    {!connected && diagnostic && (
+                        <p className="mt-2 text-xs text-amber-600 break-words">{diagnostic}</p>
+                    )}
                 </div>
 
                 <div className="py-4 px-6 border-b border-gray-200">

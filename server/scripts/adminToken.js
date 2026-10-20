@@ -8,4 +8,4 @@ if (!secret) {
   process.exit(1);
 }
 const hours = Number(process.argv[2]) > 0 ? Number(process.argv[2]) : 8;
-console.log(signToken({ id: 'admin', name: 'Admin', role: 'admin', exp: Math.floor(Date.now() / 1000) + hours * 3600 }, secret));
+console.log(signToken({ id: 'admin', name: 'Admin', role: 'admin', aud: 'dashboard', exp: Math.floor(Date.now() / 1000) + hours * 3600 }, secret));

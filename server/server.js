@@ -3,11 +3,13 @@ const express = require('express');
 const http = require('http');
 const cors = require('cors');
 const { Server } = require('socket.io');
+const crypto = require('crypto');
 const prisma = require('./utils/db');
 const aiConfig = require('./ai/config');
 const { verifyToken, signToken } = require('./ai/auth');
 const { createChatHandler } = require('./ai/chatHandler');
 const { isAiEnabled } = require('./ai/agent');
+const { createRateLimiter } = require('./ai/rateLimiter');
 
 const PORT = process.env.PORT || 5002;
 
@@ -29,8 +31,11 @@ const CLIENT_ORIGINS = [
   .filter((origin, index, arr) => origin && arr.indexOf(origin) === index);
 
 const app = express();
+// Production: only the configured frontends (CLIENT_ORIGIN + localhost defaults)
+// may call the REST API from a browser. Server-to-server calls send no Origin.
+app.set('trust proxy', 1); // Render terminates TLS; makes req.ip the real client
 app.use(cors({
-  origin: "*",
+  origin: process.env.NODE_ENV === 'production' ? CLIENT_ORIGINS : '*',
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
@@ -48,39 +53,48 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString(), authRequired: Boolean(aiConfig.authSecret) });
 });
 
-// ---- Local-development admin access ---------------------------------------
-// Lets the AdminDashboard open without a login or a pasted token: the server
-// mints a short-lived admin JWT (same format/secret as `npm run admin-token`) so
-// the normal socket auth path stays fully enforced. Hard-restricted to local
-// development:
-//   - needs an explicit opt-in (ADMIN_DEV_ACCESS=true) AND NODE_ENV !== 'production'
-//   - needs CHAT_AUTH_SECRET (tokens are still signed and verified)
-//   - only answers loopback connections with a localhost Host header (blocks
-//     DNS rebinding) and a localhost Origin (blocks other websites from reading
-//     the token cross-origin; CORS is otherwise open on this server)
-const ADMIN_DEV_ACCESS = process.env.ADMIN_DEV_ACCESS === 'true' && process.env.NODE_ENV !== 'production';
-const ADMIN_DEV_TOKEN_TTL_SECONDS = 10 * 60;
-const LOCAL_HOST_RE = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
-const LOCAL_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
-const LOOPBACK_ADDRS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+// ---- Dashboard access ------------------------------------------------------
+// The support dashboard has no login UI. Its (server-side) host - the Vercel
+// function / Vite dev middleware in client/api/admin-token.js - proves itself
+// with a long random deployment key (ADMIN_DASHBOARD_KEY) and receives a
+// short-lived, signed dashboard token (role=admin, aud=dashboard). The browser
+// never sees the key or CHAT_AUTH_SECRET, and the socket still goes through the
+// normal CHAT_AUTH_SECRET verification. Customer tokens (OfficeGST) carry no
+// such claims, so they can never act as the dashboard.
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const ADMIN_DASHBOARD_KEY = process.env.ADMIN_DASHBOARD_KEY || '';
+const ADMIN_KEY_MIN_LENGTH = 32;
+const ADMIN_TOKEN_TTL_SECONDS = 10 * 60;
+const adminKeyLimiter = createRateLimiter(10, 60 * 1000);
 
-app.get('/api/admin/dev-token', (req, res) => {
-  const origin = req.headers.origin;
-  if (
-    !ADMIN_DEV_ACCESS ||
-    !aiConfig.authSecret ||
-    !LOOPBACK_ADDRS.has(req.socket.remoteAddress) ||
-    !LOCAL_HOST_RE.test(req.headers.host || '') ||
-    (origin && !LOCAL_ORIGIN_RE.test(origin))
-  ) {
-    return res.status(404).json({ error: 'Not found.' });
+const safeEqual = (a, b) => {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+};
+
+app.post('/api/admin/session', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!aiConfig.authSecret) {
+    return res.status(503).json({ code: 'config', error: 'CHAT_AUTH_SECRET is not configured on the chat server.' });
+  }
+  if (ADMIN_DASHBOARD_KEY.length < ADMIN_KEY_MIN_LENGTH) {
+    return res.status(503).json({ code: 'config', error: `ADMIN_DASHBOARD_KEY is not set (min ${ADMIN_KEY_MIN_LENGTH} chars) on the chat server.` });
+  }
+  // Only the dashboard's server-side host may call this. A browser request
+  // always carries an Origin header, so refuse those outright.
+  if (req.headers.origin) return res.status(403).json({ code: 'forbidden', error: 'Not allowed from a browser.' });
+  if (!adminKeyLimiter(req.ip)) return res.status(429).json({ code: 'rate_limited', error: 'Too many attempts.' });
+
+  const provided = req.headers['x-admin-key'];
+  if (typeof provided !== 'string' || !safeEqual(provided, ADMIN_DASHBOARD_KEY)) {
+    return res.status(401).json({ code: 'bad_key', error: 'Invalid dashboard key.' });
   }
   const token = signToken(
-    { id: 'admin', name: 'Admin', role: 'admin', exp: Math.floor(Date.now() / 1000) + ADMIN_DEV_TOKEN_TTL_SECONDS },
+    { id: 'dashboard', name: 'Support Dashboard', role: 'admin', aud: 'dashboard', exp: Math.floor(Date.now() / 1000) + ADMIN_TOKEN_TTL_SECONDS },
     aiConfig.authSecret
   );
-  res.set('Cache-Control', 'no-store');
-  res.json({ token, expiresIn: ADMIN_DEV_TOKEN_TTL_SECONDS });
+  res.json({ token, expiresIn: ADMIN_TOKEN_TTL_SECONDS });
 });
 
 // Chat history for the caller's OWN room. The same history is also pushed over
@@ -125,7 +139,14 @@ const io = new Server(server, {
 // live session, so the client's in-flight polling requests can't hit
 // "Session ID unknown"; it receives a clean `connect_error` instead.
 io.use((socket, next) => {
-  if (!aiConfig.authSecret) return next();
+  if (!aiConfig.authSecret) {
+    if (IS_PRODUCTION) {
+      const err = new Error('server_misconfigured');
+      err.data = { code: 'server_misconfigured', message: 'CHAT_AUTH_SECRET is not set on the chat server.' };
+      return next(err);
+    }
+    return next(); // local dev only: customer identities are client-asserted
+  }
   const claims = verifyToken(socket.handshake.auth && socket.handshake.auth.token, aiConfig.authSecret);
   if (!claims) {
     const err = new Error('unauthorized');
@@ -136,10 +157,15 @@ io.use((socket, next) => {
   next();
 });
 
+// roomId -> number of live customer sockets (drives the dashboard's online dot)
+const onlineCounts = new Map();
+
 // Socket.io with Database Integration
 io.on('connection', (socket) => {
 
-  let isAdmin = socket.handshake.query.isAdmin === 'true';
+  // Never derived from client-supplied query values: only a verified dashboard
+  // token (below) grants admin.
+  let isAdmin = false;
   // Reassigned once createOrGetRoom resolves the real DB user id (see below).
   let userId = socket.handshake.query.userId || null;
   let userName = socket.handshake.query.userName || "";
@@ -152,7 +178,7 @@ io.on('connection', (socket) => {
     userId = String(claims.id || claims.sub || '') || null;
     userName = claims.name || "";
     userEmail = claims.email || "";
-    isAdmin = claims.role === 'admin' && socket.handshake.query.isAdmin === 'true';
+    isAdmin = claims.role === 'admin' && claims.aud === 'dashboard';
   }
 
   const roomId = userId
@@ -194,6 +220,8 @@ io.on('connection', (socket) => {
     });
   } else {
     socket.join(roomId);
+    onlineCounts.set(roomId, (onlineCounts.get(roomId) || 0) + 1);
+    notifyAdmins(roomId).catch(() => {});
 
     roomSetupPromise = createOrGetRoom(roomId, userId, userName, userEmail)
       .then(({ room, userId: resolvedUserId }) => {
@@ -244,10 +272,17 @@ io.on('connection', (socket) => {
       });
 
       socket.emit('admin_history', { roomId: targetRoomId, messages: rows.reverse() });
+      await markRoomRead(targetRoomId);
     } catch (error) {
       console.error('Error loading room on join_room:', error);
       socket.emit('error', { message: 'Failed to load room' });
     }
+  });
+
+  // The dashboard is showing new customer messages in the open conversation.
+  socket.on('mark_read', async (targetRoomId) => {
+    if (!isAdmin || typeof targetRoomId !== 'string') return;
+    try { await markRoomRead(targetRoomId); } catch (error) { console.error('mark_read failed:', error); }
   });
 
   socket.on('client_message', async (payload) => {
@@ -316,15 +351,24 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', async () => {
-    if (isAdmin) {
-    } else {
+    if (!isAdmin) {
       console.log(`[socket] customer disconnected: ${socket.id} (room: ${roomId})`);
-      // Update room status in database if needed
+      const left = (onlineCounts.get(roomId) || 1) - 1;
+      if (left > 0) onlineCounts.set(roomId, left); else onlineCounts.delete(roomId);
+      notifyAdmins(roomId).catch(() => {});
     }
   });
 });
 
 // Helper functions
+async function markRoomRead(targetRoomId) {
+  const { count } = await prisma.message.updateMany({
+    where: { roomId: targetRoomId, sender: 'user', isRead: false },
+    data: { isRead: true }
+  });
+  if (count > 0) io.to('admins').emit('active_rooms', await getActiveRooms());
+}
+
 async function createOrGetRoom(roomId, userId, userName, userEmail) {
   let room = await prisma.room.findUnique({
     where: { id: roomId }
@@ -417,13 +461,20 @@ async function getActiveRooms() {
       }
     });
 
+    const unread = await prisma.message.groupBy({
+      by: ['roomId'],
+      where: { sender: 'user', isRead: false },
+      _count: { _all: true }
+    });
+    const unreadByRoom = new Map(unread.map((u) => [u.roomId, u._count._all]));
+
     return rooms.map(room => ({
       roomId: room.id,
       customerName: room.users?.[0]?.userName || "",
       lastMessage: room.messages?.[0]?.text || "No messages",
       lastMessageTime: room.lastMessage,
-      online: true,
-      totalMessages: room.messages.length
+      online: (onlineCounts.get(room.id) || 0) > 0,
+      unreadCount: unreadByRoom.get(room.id) || 0
     }));
   } catch (error) {
     console.error("Error getting active rooms:", error);
@@ -466,11 +517,13 @@ server.listen(PORT, async () => {
   console.log(isAiEnabled()
     ? `AI chat enabled (model: ${aiConfig.model})`
     : 'GEMINI_API_KEY not set — chat replies are disabled until it is configured');
-  if (process.env.ADMIN_DEV_ACCESS === 'true') {
-    console.warn(ADMIN_DEV_ACCESS && aiConfig.authSecret
-      ? '[admin] ADMIN_DEV_ACCESS on: /api/admin/dev-token serves loopback requests only (local development)'
-      : '[admin] ADMIN_DEV_ACCESS ignored (disabled in production or CHAT_AUTH_SECRET missing)');
+  if (!ADMIN_DASHBOARD_KEY || ADMIN_DASHBOARD_KEY.length < ADMIN_KEY_MIN_LENGTH) {
+    console.warn(`[admin] ADMIN_DASHBOARD_KEY missing or shorter than ${ADMIN_KEY_MIN_LENGTH} chars - the support dashboard cannot connect`);
   }
+  if (IS_PRODUCTION && !aiConfig.authSecret) {
+    console.error('[auth] CHAT_AUTH_SECRET is not set in production - all socket connections are refused');
+  }
+  console.log(`[cors] allowed browser origins: ${CLIENT_ORIGINS.join(', ')}`);
   if (!aiConfig.authSecret) {
     console.warn('CHAT_AUTH_SECRET not set — socket identities are client-asserted (dev mode)');
   }

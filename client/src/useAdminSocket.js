@@ -2,20 +2,21 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { io } from 'socket.io-client';
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:5002';
-const UNAUTHORIZED_RETRY_MS = 5000;
+const RETRY_BASE_MS = 5000;
+const RETRY_MAX_MS = 60000;
 
-// Local development: the server hands out a short-lived admin token to loopback
-// requests (see /api/admin/dev-token). No login and nothing to paste. In any
-// environment where that endpoint is disabled this resolves to '' and the
-// server rejects the socket, which surfaces as `accessDenied`.
+// The dashboard has no login. Its own host (Vercel function / Vite dev
+// middleware, client/api/admin-token.js) holds a server-side key and returns a
+// short-lived dashboard token. Resolves { token } or { error } with a message an
+// operator can act on.
 const fetchAdminToken = async () => {
   try {
-    const res = await fetch(`${SERVER_URL}/api/admin/dev-token`, { cache: 'no-store' });
-    if (!res.ok) return '';
-    const data = await res.json();
-    return data.token || '';
+    const res = await fetch('/api/admin-token', { cache: 'no-store' });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.token) return { token: data.token };
+    return { error: data.error || `Dashboard token service returned ${res.status}.` };
   } catch {
-    return '';
+    return { error: 'Dashboard token service (/api/admin-token) is unreachable.' };
   }
 };
 
@@ -28,16 +29,25 @@ export default function useAdminSocket() {
   const [connected, setConnected] = useState(false);
   const [botTyping, setBotTyping] = useState(false);
   const [accessDenied, setAccessDenied] = useState(false);
+  // Human-readable reason the dashboard cannot connect (config/auth/network).
+  const [diagnostic, setDiagnostic] = useState('');
 
   // One socket for the lifetime of the dashboard. Socket.IO reconnects on its
   // own after network drops or server restarts; the auth callback below runs on
   // every attempt so a fresh token is always presented.
   useEffect(() => {
     let retryTimer = null;
+    let retryAttempt = 0;
+    let lastTokenError = '';
 
     const socket = io(SERVER_URL, {
-      query: { isAdmin: 'true' },
-      auth: (cb) => { fetchAdminToken().then((token) => cb({ token })); },
+      // Admin status comes only from the signed token the server verifies.
+      auth: (cb) => {
+        fetchAdminToken().then(({ token, error }) => {
+          lastTokenError = error || '';
+          cb({ token: token || '' });
+        });
+      },
       transports: ['polling', 'websocket'],
       withCredentials: false,
       reconnection: true,
@@ -53,6 +63,8 @@ export default function useAdminSocket() {
     socket.on('connect', () => {
       setConnected(true);
       setAccessDenied(false);
+      setDiagnostic('');
+      retryAttempt = 0;
       if (selectedRoomRef.current) socket.emit('join_room', selectedRoomRef.current);
     });
 
@@ -63,12 +75,23 @@ export default function useAdminSocket() {
 
     socket.on('connect_error', (err) => {
       setConnected(false);
-      // Middleware rejections are not retried by socket.io; retry ourselves in
-      // case the server came up with different settings.
-      if (err && err.message === 'unauthorized') {
+      // Middleware rejections are not retried by socket.io, so retry here with
+      // exponential backoff (5s, 10s, ... capped at 60s) - never a tight loop.
+      // A fresh token is fetched on each attempt, so expiry self-heals.
+      const code = err && err.message;
+      if (code === 'unauthorized' || code === 'server_misconfigured') {
         setAccessDenied(true);
+        setDiagnostic(
+          code === 'server_misconfigured'
+            ? 'Chat server is missing CHAT_AUTH_SECRET.'
+            : lastTokenError || 'Chat server rejected the dashboard credentials.'
+        );
         clearTimeout(retryTimer);
-        retryTimer = setTimeout(() => socket.connect(), UNAUTHORIZED_RETRY_MS);
+        const delay = Math.min(RETRY_BASE_MS * 2 ** retryAttempt, RETRY_MAX_MS);
+        retryAttempt += 1;
+        retryTimer = setTimeout(() => socket.connect(), delay);
+      } else {
+        setDiagnostic(`Cannot reach chat server at ${SERVER_URL}. Retrying…`);
       }
     });
 
@@ -91,6 +114,8 @@ export default function useAdminSocket() {
     socket.on('message', (msg) => {
       if (!msg || msg.roomId !== selectedRoomRef.current) return;
       setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+      // Customer text arriving in the conversation being read is not "unread".
+      if (msg.sender === 'user') socket.emit('mark_read', msg.roomId);
     });
 
     socket.on('bot_typing', (isTyping) => {
@@ -130,5 +155,6 @@ export default function useAdminSocket() {
     botTyping,
     sendMessage,
     accessDenied,
+    diagnostic,
   };
 }
