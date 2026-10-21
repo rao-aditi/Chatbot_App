@@ -18,7 +18,8 @@ const DEFAULT_CLIENT_ORIGINS = [
   "http://localhost:5173",
   "http://127.0.0.1:3000",
   "http://127.0.0.1:5173",
-  "https://chatbot-app-rust.vercel.app"
+  "https://chatbot-app-rust.vercel.app",
+  "https://gst-backend-mu.vercel.app/",
 ];
 
 // Local dev origins always stay allowed alongside whatever CLIENT_ORIGIN
